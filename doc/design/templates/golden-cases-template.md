@@ -1,7 +1,7 @@
 # ゴールデンケース定義書
 
 > **記入ガイド**: `{...}` を埋めてください。各スライスごとに本ファイルをコピーします。
-> **目的**: COBOL実機の入出力仕様を「入力 → 期待レスポンス」の形で固定し、.NET実装の受け入れ基準とする。
+> **目的**: COBOL実機の入出力仕様を「入力 → 期待レスポンス」の形で固定し、Java実装の受け入れ基準とする。
 
 ---
 
@@ -62,7 +62,7 @@ GET /{resource}/{存在するID}
 または curl:
 
 ```bash
-curl -s "http://localhost:5000/{resource}/{存在するID}"
+curl -s "http://localhost:8080/{resource}/{存在するID}"
 ```
 
 **期待レスポンスボディ**
@@ -97,7 +97,7 @@ curl -s "http://localhost:5000/{resource}/{存在するID}"
 **リクエスト**
 
 ```bash
-curl -s "http://localhost:5000/{resource}/{存在しないID}"
+curl -s "http://localhost:8080/{resource}/{存在しないID}"
 ```
 
 **期待レスポンスボディ**
@@ -126,13 +126,13 @@ curl -s "http://localhost:5000/{resource}/{存在しないID}"
 
 ```bash
 # 桁数不足
-curl -s "http://localhost:5000/{resource}/123"
+curl -s "http://localhost:8080/{resource}/123"
 
 # 数字以外を含む
-curl -s "http://localhost:5000/{resource}/AAAA000000000"
+curl -s "http://localhost:8080/{resource}/AAAA000000000"
 
 # 空文字
-curl -s "http://localhost:5000/{resource}/"
+curl -s "http://localhost:8080/{resource}/"
 ```
 
 **期待レスポンスボディ**
@@ -176,7 +176,7 @@ curl -s "http://localhost:5000/{resource}/"
 **リクエスト**
 
 ```bash
-curl -s "http://localhost:5000/{resource}?{queryParam}={検索値}&pageSize=2"
+curl -s "http://localhost:8080/{resource}?{queryParam}={検索値}&pageSize=2"
 ```
 
 **期待レスポンスボディ（件数・ページング）**
@@ -205,10 +205,10 @@ curl -s "http://localhost:5000/{resource}?{queryParam}={検索値}&pageSize=2"
 ```bash
 #!/usr/bin/env bash
 # tests/e2e/{slice}-golden.sh
-# 実行: BASE_URL=http://localhost:5000 bash tests/e2e/{slice}-golden.sh
+# 実行: BASE_URL=http://localhost:8080 bash tests/e2e/{slice}-golden.sh
 
 set -euo pipefail
-BASE="${BASE_URL:-http://localhost:5000}"
+BASE="${BASE_URL:-http://localhost:8080}"
 PASS=0; FAIL=0
 
 check() {
@@ -239,7 +239,7 @@ echo "Results: PASS=$PASS FAIL=$FAIL"
 
 ## 4. ゴールデンケース進捗
 
-| ケースID | 作成済み | .NET実装で一致確認 | 備考 |
+| ケースID | 作成済み | Java実装で一致確認 | 備考 |
 |---|---|---|---|
 | GC-01 | [ ] | [ ] | |
 | GC-02 | [ ] | [ ] | |

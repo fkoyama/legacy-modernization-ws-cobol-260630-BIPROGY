@@ -11,8 +11,8 @@ info:
 servers:
   - url: "https://{container-apps-fqdn}"
     description: Azure Container Apps (本番)
-  - url: "http://localhost:5000"
-    description: ローカル開発
+  - url: "http://localhost:8080"
+    description: ローカル開発（Spring Boot デフォルトポート）
 
 # ============================================================
 # パス定義
@@ -113,7 +113,8 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   # ---- ヘルスチェック (全スライス共通) -------------------------
-  /healthz:
+  # Spring Boot Actuator のヘルスエンドポイント
+  /actuator/health:
     get:
       operationId: healthCheck
       summary: ヘルスチェック
@@ -127,7 +128,7 @@ paths:
                 properties:
                   status:
                     type: string
-                    example: "ok"
+                    example: "UP"
 
 # ============================================================
 # コンポーネント定義

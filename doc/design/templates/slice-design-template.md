@@ -10,7 +10,7 @@
 | 項目 | 内容 |
 |---|---|
 | スライス名 | `{サブシステム番号}-{名前}` 例: `08-account` |
-| 担当 | `.NET#1` / `.NET#2` |
+| 担当 | `Java#1` / `Java#2` |
 | 仕様担当 | `COBOL#1` / `COBOL#2` |
 | 作成日 | {YYYY-MM-DD} |
 | ステータス | 起草 / レビュー中 / 確定 |
@@ -146,34 +146,40 @@ WHERE  {条件};
 
 ---
 
-## 5. 実装方針（.NET）
+## 5. 実装方針（Java）
 
 ### 5.1 プロジェクト構成
 
 ```
-{SliceName}.Api/
-  Program.cs          ← エントリポイント・DI登録・ルーティング
-  Endpoints/
-    {Resource}Endpoints.cs   ← MapGet定義
-  Models/
-    {Resource}.cs            ← レスポンスDTO
-  Repositories/
-    {Resource}Repository.cs  ← Npgsqlクエリ実装
+{slice-name}-api/
+  pom.xml                          ← 依存定義（Spring Boot, spring-jdbc, postgresql）
+  src/main/java/{basePackage}/
+    Application.java               ← エントリポイント（@SpringBootApplication）
+    controller/
+      {Resource}Controller.java    ← @RestController / @GetMapping
+    model/
+      {Resource}.java              ← レスポンスDTO（record推奨）
+    repository/
+      {Resource}Repository.java    ← JdbcTemplate クエリ実装
+  src/main/resources/
+    application.yml                ← DB接続・プロファイル設定
 ```
 
 ### 5.2 バリデーション実装方針
 
-```csharp
+```java
 // 例: 13桁数字チェック
-if ({param}.Length != {N} || !{param}.All(char.IsDigit))
-    return Results.BadRequest(new { error = "invalid_input", detail = "..." });
+if ({param}.length() != {N} || !{param}.matches("\\d+")) {
+    return ResponseEntity.badRequest()
+        .body(Map.of("error", "invalid_input", "detail", "..."));
+}
 ```
 
-### 5.3 接続文字列・シークレット管理
+### 5.3 接続情報・シークレット管理
 
 | 項目 | 取得元 | Key Vault シークレット名 |
 |---|---|---|
-| DB接続文字列 | Key Vault | `{secret-name}` |
+| DB接続情報（JDBC URL / ユーザ / パスワード） | Key Vault（`application.yml` のプレースホルダ経由で注入） | `{secret-name}` |
 | {その他} | {取得元} | `{secret-name}` |
 
 ---
@@ -184,21 +190,21 @@ if ({param}.Length != {N} || !{param}.All(char.IsDigit))
 |---|---|
 | レスポンスタイム目標 | {例: p99 ≤ 500ms} |
 | 認証 | {例: なし（内部API）/ Azure AD} |
-| ログ | App Insights トレース（リクエスト/エラー） |
-| ヘルスチェック | `GET /healthz` → 200 |
+| ログ | App Insights トレース（Java エージェント / リクエスト・エラー） |
+| ヘルスチェック | `GET /actuator/health`（Spring Boot Actuator）→ 200 |
 
 ---
 
 ## 7. 受け渡し物チェックリスト
 
-### COBOL#1/2 → .NET
+### COBOL#1/2 → Java
 
 - [ ] 仕様メモ（本ドキュメント）確定
 - [ ] OpenAPI雛形 (`docs/specs/{slice}-api.yaml`) コミット済み
 - [ ] ゴールデンケース (`docs/tests/{slice}-golden.md`) コミット済み
 - [ ] サンプルデータdump (`data/seed/{slice}-seed.sql`) 用意済み
 
-### .NET → Azure
+### Java → Azure
 
 - [ ] コンテナイメージ (ACR タグ) 確定
 - [ ] 必要な env/secret 一覧 (`docs/deploy/{slice}-env.md`) 確定
