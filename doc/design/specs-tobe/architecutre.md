@@ -81,3 +81,53 @@ Javaコンソールアプリとする
 - Spring Boot
 - PostgreSQL
 
+## 7. RDBMS移行テーブル一覧（所属つき）
+
+方針: 現在PostgreSQLにあるテーブル + ISAM（INDEXED）で管理しているデータを、すべてRDBMSテーブルとして管理する。
+
+### 7.1 マスター管理アプリに属するテーブル
+
+| テーブル名 | 現状 | 元データ | 所属 | 備考 |
+|---|---|---|---|---|
+| calendar | 既存 | PostgreSQL + CALENDAR-FILE(ISAM) | Master Reference App | 現行継続 |
+| branches | 既存 | PostgreSQL + BRANCH-FILE(ISAM) | Master Reference App | region/opened_date/status を保持 |
+| customers | 既存 | PostgreSQL + CUSTOMER-FILE(ISAM) | Master Reference App | opened_date を追加保持 |
+| products | 既存 | PostgreSQL + PRODUCT-FILE(ISAM) | Master Reference App | name_kana/ovd/term_days/eff期間の反映を検討 |
+| interest_rates | 既存 | PostgreSQL + IRATE-FILE(ISAM) | Master Reference App | tier/tier_min/tier_max/eff_to の反映を検討 |
+| fee_schedules | 既存 | PostgreSQL + FS-FILE(ISAM) | Master Reference App | tier_min/tier_max/eff_to の反映を検討 |
+| accounts | 既存 | PostgreSQL + ACCOUNT-FILE(ISAM) | Master Reference App | closed_date/overdraft/term_days の反映を検討 |
+
+補足:
+
+- 04-customersearch と 09-accountlifecycle は上記マスタテーブルを参照/更新するアプリ機能として扱う（専用テーブルは必須ではない）
+
+### 7.2 取引パイプラインに属するテーブル
+
+| テーブル名 | 現状 | 元データ | 所属 | 備考 |
+|---|---|---|---|---|
+| transactions | 既存 | PostgreSQL | Transaction Pipeline App | 現行継続 |
+| postings | 既存 | PostgreSQL | Transaction Pipeline App | 現行継続 |
+| balances | 既存 | PostgreSQL | Transaction Pipeline App | 現行継続 |
+| interest_accruals | 既存 | PostgreSQL | Transaction Pipeline App | 現行継続 |
+| autodebit_schedules | 既存 | PostgreSQL | Transaction Pipeline App | 現行継続 |
+| batch_run | 既存 | PostgreSQL | Transaction Pipeline App | 現行継続 |
+| audit_log | 既存 | PostgreSQL | Transaction Pipeline App | 監査テーブル（パーティション運用） |
+| audit_outbox | 既存 | PostgreSQL | Transaction Pipeline App | 連携イベント出力 |
+
+### 7.3 ISAMからRDBMSへの対応関係（要約）
+
+| ISAMファイル | 移行先RDBMSテーブル | 所属 |
+|---|---|---|
+| CALENDAR-FILE | calendar | Master Reference App |
+| BRANCH-FILE | branches | Master Reference App |
+| CUSTOMER-FILE | customers | Master Reference App |
+| PRODUCT-FILE | products | Master Reference App |
+| IRATE-FILE | interest_rates | Master Reference App |
+| FS-FILE | fee_schedules | Master Reference App |
+| ACCOUNT-FILE | accounts | Master Reference App |
+
+### 7.4 結論
+
+- ISAM管理データはすべて Master Reference App 側RDBMSに集約できる
+- 取引パイプラインは取引系テーブルのみ保持し、マスタはHTTP API経由で参照する
+
