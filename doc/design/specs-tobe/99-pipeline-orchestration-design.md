@@ -3,6 +3,7 @@
 > **位置づけ**: COBOL の取引パイプライン（コア 4 サブシステム 19-integrationin / 10-txnvalidate / 11-txnsortmerge / 12-txnpost）を **1 本の Spring Boot コンソールアプリケーション**として一気通貫で実行する TO-BE 全体設計。
 > さらに、コア記帳（12）の後段に位置する **13-interestaccrual / 14-interestpost / 15-autodebit / 16-fee / 17-statement / 20-integrationout** を、同一プロセスの **main 処理から関数呼び出し**で起動できる構成とする。
 > 本アプリがマスタ参照系（01〜09）の機能を使う場合は、[architecutre.md](architecutre.md) に沿って **Master Reference App への同期 REST 呼び出し**に置き換える（§2.6）。
+> **入力データは JSON 形式のファイル**で受領する前提とする。旧 EBCDIC 固定長からの JSON 変換は上流系の責務であり、本アプリの範囲外（今回未実装）。
 > 各サブシステムの詳細は [19](19-integrationin-design.md) / [10](10-txnvalidate-design.md) / [11](11-txnsortmerge-design.md) / [12](12-txnpost-design.md) を参照。
 > AS-IS 仕様は [specs-asis/02-transaction-pipeline.md](../specs-asis/02-transaction-pipeline.md)、アプリ分割方針は [architecutre.md](architecutre.md) を一次情報とする。
 
@@ -19,6 +20,7 @@
 | 実装言語 | Java 21 / Spring Boot 3（Spring Batch は任意。本設計は素の Service 合成を基本とする） |
 | アプリ形態 | **Spring Boot コンソールアプリ**（3 層：Controller = コンソール / Service = ステージ / Repository = PG + REST） |
 | ビルド | **Gradle** |
+| 入力データ | **JSON 形式のファイル**（業務日単位のバッチ）。上流系での JSON 生成（旧 EBCDIC からの変換等）は本アプリの範囲外＝今回未実装 |
 | 記帳先 DB | PostgreSQL 15（`transactions` / `postings` / `balances` / `audit_outbox` ほか）— Transaction Pipeline App 側 |
 | マスタ参照 | Master Reference App へ **同期 REST/JSON**（[architecutre.md](architecutre.md) §3） |
 | 作成日 | 2026-06-30 |
@@ -200,7 +202,7 @@ flowchart LR
 **コンソール入力例（イメージ）**:
 
 ```text
-> run-daily   --batch-id EBC20260630-01 --business-date 20260630 --input /data/in/txn.ebc
+> run-daily   --batch-id JSON20260630-01 --business-date 20260630 --input /data/in/txn.json
 > run-monthend --business-date 20260630          # 14 を含む月末コマンド
 > statement   --mode M --business-date 20260630  # 17 のみ実行
 ```
@@ -260,7 +262,7 @@ public interface MasterReferenceClient {
 
 ```mermaid
 flowchart TB
-    F["EBCDIC ファイル（Blob/ローカル）"] --> D["DecodeStage: Stream&lt;DecodedTxn&gt; 逐次"]
+    F["JSON ファイル（Blob/ローカル）"] --> D["DecodeStage: JSON パース → Stream&lt;DecodedTxn&gt; 逐次"]
     D --> V["ValidateStage: 逐次検証 → valid/error 振り分け"]
     V --> S["SortMergeStage: List 確定 → payer+seq ソート → 前日 recon 突合"]
     S --> P["PostStage: payer ブロック単位で SERIALIZABLE 記帳"]
@@ -326,7 +328,7 @@ public void postPair(ReadyTxn txn, BatchContext ctx) { ... }
 | A | 一気通貫時の **checkpoint/recover**（10）。JVM 内では中間状態が揮発する | **再実行時の冪等は 12 の `txn_id` 一意制約（I1）に集約**し、19/10/11 は再計算で割り切る。10 の `.ckpt` は廃止 | 各ステージ結果を一時テーブルに永続し中断再開 |
 | B | 11 の **前日 recon 突合データの所在**。AS-IS は前日 `ready.dat` を参照 | 前日確定分を **PG テーブル `daily_ready`（business_date, payer_acct, seq, ...）に永続**し、当日突合はこれを読む | 前日 `ready` をファイルとして保管し読み込む |
 | C | **バッチ流量**（全件メモリ vs 逐次） | 19→10 は `Stream` 逐次、11 のソートのみ `List` 確定、12 は口座ブロック単位コミット | 全段 Spring Batch チャンク処理に委譲 |
-| D | **EBCDIC 変換**（19）。AS-IS は C util（CP930→UTF-8） | JDK 標準 `Charset.forName("Cp930")`（IBM930）で置換。外部プロセス呼び出しを排除 | ICU4J による変換 |
+| D | **入力フォーマット**（19）。AS-IS は EBCDIC 固定長を C util（CP930→UTF-8）で変換 | **入力は JSON 形式**を前提とし、`DecodeStage` は JSON を Jackson 等でパースしてドメイン型（`DecodedTxn`）へマッピングする。EBCDIC デコードは廃止し、JSON 生成は上流系の責務（本アプリ範囲外・未実装） | 旧 EBCDIC を継続受領する場合は別途デコード段を追加 |
 | E | **多重起動防止**（AS-IS `flock`） | DB アドバイザリロック（`pg_advisory_lock`）or `batch_run` テーブルの一意制約で代替 | 実行基盤側（K8s Job 同時実行数=1） |
 
 ---
