@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: transaction-pipeline-app
+  # Console / batch application — do not start a web server
+  main:
+    web-application-type: none
+    banner-mode: "off"
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://postgres:5432/banking}
+    username: ${DB_USER:cobol}
+    password: ${DB_PASSWORD:cobol}
+    driver-class-name: org.postgresql.Driver
+
+# Master Reference App (subsystems 01-09) base URL — see architecture.md / OpenAPI
+master:
+  base-url: ${MASTER_BASE_URL:http://localhost:8081/api/v1}
+
+# Serializable retry settings for 12-txnpost (design 99 / 12 §2.4)
+pipeline:
+  post:
+    retry:
+      max-attempts: 5
+      delay-ms: 10
+      multiplier: 2
+      max-delay-ms: 2000
+  decode:
+    reject-threshold-pct: 100
+
+logging:
+  level:
+    root: INFO
+    com.practicebank.pipeline: INFO
