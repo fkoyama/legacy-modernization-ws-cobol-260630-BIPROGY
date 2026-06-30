@@ -1,0 +1,1528 @@
+openapi: "3.0.3"
+info:
+  title: "Master Reference App API"
+  version: "1.0.0"
+  description: |
+    practice-bank モダナイゼーション — Master Reference App（マスタ参照系 01〜09）
+
+    architecture.md に基づき、マスタ参照系サブシステム（01〜09）を 1 つの
+    Spring Boot アプリ（Master Reference App）として提供する REST/JSON API。
+    Transaction Pipeline App（10〜20）から同期 HTTP で呼び出される。
+
+    対応 COBOL サブシステム:
+      - 01-calendar         → /business-calendar
+      - 02-branch           → /branches
+      - 03-customer         → /customers
+      - 04-customersearch   → /customer-search
+      - 05-product          → /products
+      - 06-interestrate     → /interest-rates
+      - 07-feeschedule      → /fee-schedules
+      - 08-account          → /accounts
+      - 09-accountlifecycle → /accounts（開設・状態遷移）, /account-lifecycle（スキャン）
+
+    COBOL ステータス → HTTP 変換:
+      00 → 200（または 201/204） / 02 → 200（警告は本文で表現）
+      04 → 404 / 08 → 400 / 10 → 200（EOF は空配列） / 12,16 → 500
+
+servers:
+  - url: "https://{container-apps-fqdn}/api/v1"
+    description: Azure Container Apps（本番）
+    variables:
+      container-apps-fqdn:
+        default: "master-reference.example.azurecontainerapps.io"
+  - url: "http://localhost:8080/api/v1"
+    description: ローカル開発（Spring Boot デフォルトポート）
+
+tags:
+  - name: business-calendar
+    description: 01-calendar 営業日カレンダー参照
+  - name: branches
+    description: 02-branch 支店マスタ参照
+  - name: customers
+    description: 03-customer 顧客マスタ参照・状態変更
+  - name: customer-search
+    description: 04-customersearch 顧客複合検索
+  - name: products
+    description: 05-product 商品マスタ参照
+  - name: interest-rates
+    description: 06-interestrate 金利マスタ参照
+  - name: fee-schedules
+    description: 07-feeschedule 手数料体系参照
+  - name: accounts
+    description: 08-account / 09-accountlifecycle 口座マスタ参照・ライフサイクル
+  - name: account-lifecycle
+    description: 09-accountlifecycle 休眠・再活性スキャン
+  - name: health
+    description: ヘルスチェック
+
+# ============================================================
+# パス定義
+# ============================================================
+paths:
+
+  # ============================================================
+  # 01-calendar
+  # ============================================================
+  /business-calendar/{date}:
+    get:
+      tags: [business-calendar]
+      operationId: getBusinessCalendar
+      summary: "指定日の営業日区分を取得（CAL-LOOKUP）"
+      description: |
+        指定日が営業日(B)／祝日(H)／週末(W)のいずれかを判定する。
+        対象範囲は 20260101–20301231。範囲外は 400（COBOL status=08）。
+      parameters:
+        - $ref: "#/components/parameters/CalendarDatePath"
+      responses:
+        "200":
+          description: 正常（COBOL CAL-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BusinessCalendarDay"
+              example:
+                date: "2026-01-01"
+                dayType: "H"
+                holidayName: "元日"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /business-calendar/{date}/next-business-day:
+    get:
+      tags: [business-calendar]
+      operationId: getNextBusinessDay
+      summary: "翌営業日を取得（CAL-NEXT-BD）"
+      description: |
+        起点日から最大 10 日先まで前進し、最初の営業日を返す。
+        探索範囲内に営業日が無い場合は 404（COBOL status=04）。
+      parameters:
+        - $ref: "#/components/parameters/CalendarDatePath"
+      responses:
+        "200":
+          description: 正常（COBOL CAL-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BusinessDayResult"
+              example:
+                baseDate: "2026-01-01"
+                businessDate: "2026-01-05"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /business-calendar/{date}/previous-business-day:
+    get:
+      tags: [business-calendar]
+      operationId: getPreviousBusinessDay
+      summary: "前営業日を取得（CAL-PREV-BD）"
+      description: |
+        起点日から最大 10 日前まで後退し、最初の営業日を返す。
+        探索範囲内に営業日が無い場合は 404（COBOL status=04）。
+      parameters:
+        - $ref: "#/components/parameters/CalendarDatePath"
+      responses:
+        "200":
+          description: 正常（COBOL CAL-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BusinessDayResult"
+              example:
+                baseDate: "2026-01-05"
+                businessDate: "2025-12-31"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # 02-branch
+  # ============================================================
+  /branches:
+    get:
+      tags: [branches]
+      operationId: listBranches
+      summary: "支店一覧取得（BR-LIST-ALL / BR-LIST-BY-REGION）"
+      description: |
+        全件一覧（BR-LIST-ALL）または地域別一覧（BR-LIST-BY-REGION）を返す。
+        region 指定時は当該地域のみを返す。EOF（COBOL status=10）は空配列の 200。
+      parameters:
+        - name: region
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 20
+          description: "地域名（指定時は地域別一覧。COBOL BR-IN-REGION）"
+      responses:
+        "200":
+          description: 正常（0 件でも 200）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BranchListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /branches/{branchCode}:
+    get:
+      tags: [branches]
+      operationId: getBranchByCode
+      summary: "支店を 1 件取得（BR-LOOKUP）"
+      parameters:
+        - name: branchCode
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9A-Za-z]{3}$"
+            example: "100"
+          description: "支店コード（3 桁。COBOL BR-IN-CODE）"
+      responses:
+        "200":
+          description: 正常（COBOL BR-OUT-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Branch"
+              example:
+                branchCode: "100"
+                nameKanji: "本店営業部"
+                nameKana: "ホンテンエイギョウブ"
+                region: "関東"
+                status: "A"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # 03-customer
+  # ============================================================
+  /customers:
+    get:
+      tags: [customers]
+      operationId: listCustomers
+      summary: "顧客一覧・検索（CUST-LIST-ALL / SEARCH-BY-KANA / SEARCH-BY-PHONE）"
+      description: |
+        全件一覧（CUST-LIST-ALL）、カナ前方一致（CUST-SEARCH-BY-KANA）、
+        電話完全一致（CUST-SEARCH-BY-PHONE）を提供する。
+        kana / phone のいずれかを指定すると対応する検索を行う。両方未指定は全件一覧。
+        EOF（COBOL status=10）は空配列の 200。
+      parameters:
+        - name: kana
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 50
+          description: "カナ氏名・前方一致（COBOL CUST-IN-KANA）"
+        - name: phone
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 15
+          description: "電話番号・完全一致（COBOL CUST-IN-PHONE）"
+        - $ref: "#/components/parameters/PageSize"
+        - name: startAfter
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9]{1,10}$"
+          description: "カーソル: 前ページ最後の顧客 ID 以降を取得"
+      responses:
+        "200":
+          description: 正常（0 件でも 200）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /customers/{customerId}:
+    get:
+      tags: [customers]
+      operationId: getCustomerById
+      summary: "顧客を 1 件取得（CUST-LOOKUP）"
+      parameters:
+        - $ref: "#/components/parameters/CustomerIdPath"
+      responses:
+        "200":
+          description: 正常（COBOL CUST-OUT-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+              example:
+                customerId: "0000000042"
+                kana: "ヤマダタロウ"
+                kanji: "山田太郎"
+                phone: "0312345678"
+                address: "東京都千代田区..."
+                openedDate: "2020-04-01"
+                status: "A"
+                tier: "1"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /customers/{customerId}/status:
+    patch:
+      tags: [customers]
+      operationId: changeCustomerStatus
+      summary: "顧客状態を変更（CUST-STATUS-CHANGE）"
+      description: |
+        顧客状態を更新し、21-audit へ action=CUST_STATUS_CHANGED の監査記録を残す。
+        更新は監査記録とセットで同一トランザクション内（アウトボックス）で実施する。
+      parameters:
+        - $ref: "#/components/parameters/CustomerIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerStatusChangeRequest"
+            example:
+              status: "S"
+              reason: "本人申告による一時停止"
+      responses:
+        "200":
+          description: 正常更新（COBOL CUST-OUT-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # 04-customersearch
+  # ============================================================
+  /customer-search:
+    get:
+      tags: [customer-search]
+      operationId: searchCustomers
+      summary: "顧客複合検索（CSRCH-AND / BY-ADDRESS / LIST-PAGED）"
+      description: |
+        03-customer のデータに対する複合検索。自前データは持たない。
+          - kanaPrefix AND phonePrefix: カナ前方一致 AND 電話前方一致の積集合（CSRCH-AND）
+          - addressSubstr: 住所部分一致（CSRCH-BY-ADDRESS）
+          - 条件なし: ページング一覧（CSRCH-LIST-PAGED）
+        ページングは startAfter / lastId のカーソルで継続する。
+        EOF（COBOL status=10）は空配列の 200。
+      parameters:
+        - name: kanaPrefix
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 50
+          description: "カナ前方一致（COBOL CSRCH-KANA-PREFIX、AND 検索）"
+        - name: phonePrefix
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 15
+          description: "電話前方一致（COBOL CSRCH-PHONE-PREFIX、AND 検索）"
+        - name: addressSubstr
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 50
+          description: "住所部分一致（COBOL CSRCH-ADDR-SUBSTR）"
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: "1 ページあたりの件数（COBOL CSRCH-PAGE-SIZE）"
+        - name: startAfter
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9]{1,10}$"
+          description: "カーソル: この顧客 ID 以降（COBOL CSRCH-START-AFTER）"
+      responses:
+        "200":
+          description: 正常（0 件でも 200）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerSearchListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # 05-product
+  # ============================================================
+  /products/{productCode}:
+    get:
+      tags: [products]
+      operationId: getProductByCode
+      summary: "商品を 1 件取得（PROD-LOOKUP）"
+      parameters:
+        - name: productCode
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9A-Za-z]{3}$"
+            example: "001"
+          description: "商品コード（3 桁。COBOL PRD-IN-CODE）"
+      responses:
+        "200":
+          description: 正常（COBOL PRD-OUT-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+              example:
+                productCode: "001"
+                name: "普通預金"
+                type: "S"
+                interestType: "1"
+                allowOverdraft: false
+                termDays: 0
+                effectiveFrom: "2020-04-01"
+                effectiveTo: "2099-12-31"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # 06-interestrate
+  # ============================================================
+  /interest-rates:
+    get:
+      tags: [interest-rates]
+      operationId: getInterestRate
+      summary: "金利を取得（IRATE-LOOKUP）"
+      description: |
+        商品コード・ティア・適用日の複合キーで金利を参照する。
+        レートはマイクロ単位（×1,000,000）で返却する（COBOL IR-OUT-RATE-MICRO）。
+      parameters:
+        - name: productCode
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9A-Za-z]{3}$"
+            example: "001"
+          description: "商品コード（3 桁。COBOL IR-IN-PRODUCT）"
+        - name: tier
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 99
+            example: 1
+          description: "ティア（2 桁。COBOL IR-IN-TIER）"
+        - name: effectiveDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+            example: "2026-04-01"
+          description: "適用日（COBOL IR-IN-EFFECTIVE）"
+      responses:
+        "200":
+          description: 正常（COBOL IR-OUT-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InterestRate"
+              example:
+                productCode: "001"
+                tier: 1
+                rateMicro: 1000
+                effectiveFrom: "2026-04-01"
+                effectiveTo: "2099-12-31"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # 07-feeschedule
+  # ============================================================
+  /fee-schedules:
+    get:
+      tags: [fee-schedules]
+      operationId: getFeeSchedule
+      summary: "手数料額を取得（FEE-LOOKUP-BY-TIER）"
+      description: |
+        手数料区分・ティア・適用日の複合キーで手数料額（JPY）を参照する。
+      parameters:
+        - name: category
+          in: query
+          required: true
+          schema:
+            type: integer
+            enum: [10, 20, 30, 40]
+            example: 10
+          description: "手数料区分（10/20/30/40。COBOL FS-IN-CATEGORY）"
+        - name: tier
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 99
+            example: 1
+          description: "ティア（2 桁。COBOL FS-IN-TIER）"
+        - name: effectiveDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+            example: "2026-04-01"
+          description: "適用日（COBOL FS-IN-EFFECTIVE）"
+      responses:
+        "200":
+          description: 正常（COBOL FS-OUT-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeeSchedule"
+              example:
+                category: 10
+                tier: 1
+                feeJpy: 330
+                effectiveTo: "2099-12-31"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # 08-account / 09-accountlifecycle
+  # ============================================================
+  /accounts:
+    get:
+      tags: [accounts]
+      operationId: listAccountsByCustomer
+      summary: "顧客の口座一覧取得（ACCT-LOOKUP-BY-CUSTOMER）"
+      description: |
+        顧客 ID をキーに当該顧客の全口座を返す（最大 20 件・カーソルページング）。
+        重複検知時（COBOL status=02）は warning フラグを true にして 200 を返す。
+        EOF は空配列の 200。
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9]{1,10}$"
+            example: "0000000042"
+          description: "顧客 ID（10 桁。COBOL LOOKUP-BY-CUST-CUST-ID）"
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 20
+          description: "最大取得件数（≤20。COBOL LOOKUP-BY-CUST-MAX）"
+        - name: startAfter
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9]{1,13}$"
+          description: "カーソル: この口座番号以降（COBOL LOOKUP-BY-CUST-START-AFTER）"
+      responses:
+        "200":
+          description: 正常（0 件でも 200。重複検知は warning=true）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [accounts]
+      operationId: openAccount
+      summary: "口座を新規開設（ALC-OPEN）"
+      description: |
+        口座番号を採番（支店+商品+連番）し、初期状態 P（申込中）で登録する。
+        21-audit へ開設の監査記録を残す。採番された口座番号を返す。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountOpenRequest"
+            example:
+              customerId: "0000000042"
+              productCode: "001"
+              branchCode: "100"
+              openedDate: "2026-04-01"
+      responses:
+        "201":
+          description: 開設成功（COBOL status=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountOpenResponse"
+              example:
+                accountNumber: "1000019000001"
+                status: "P"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /accounts/{accountNo}:
+    get:
+      tags: [accounts]
+      operationId: getAccountByNumber
+      summary: "口座を 1 件取得（ACCT-LOOKUP）"
+      parameters:
+        - $ref: "#/components/parameters/AccountNoPath"
+      responses:
+        "200":
+          description: 正常（COBOL ACCT-LOOKUP-STATUS=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+              example:
+                accountNumber: "1000010000001"
+                customerId: "0000000042"
+                productCode: "001"
+                branchCode: "100"
+                openedDate: "2020-04-01"
+                status: "A"
+                dormancyDate: null
+                createdAt: "2020-04-01T09:00:00Z"
+                updatedAt: "2020-04-01T09:00:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /accounts/{accountNo}/exists:
+    get:
+      tags: [accounts]
+      operationId: accountExists
+      summary: "口座の存在確認（ACCT-EXISTS）"
+      description: |
+        口座の存在・状態・商品コード・有効フラグを返す。状態=A のとき active=true。
+      parameters:
+        - $ref: "#/components/parameters/AccountNoPath"
+      responses:
+        "200":
+          description: 判定結果（存在しない場合も 200 で found=false）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountExistsResponse"
+              example:
+                found: true
+                statusCode: "A"
+                productCode: "001"
+                active: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /accounts/{accountNo}/dormancy-date:
+    patch:
+      tags: [accounts]
+      operationId: updateAccountDormancyDate
+      summary: "休眠日を更新（ACCT-UPDATE-DORMANCY-DATE）"
+      description: |
+        状態が A/D かつ 新休眠日 ≥ 旧休眠日 の場合のみ更新する。
+        更新不要（新日=旧日等）の場合は wasNoop=true で 200 を返す。
+        状態不適合・新日<旧日は 400（COBOL status=08）。
+      parameters:
+        - $ref: "#/components/parameters/AccountNoPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DormancyDateUpdateRequest"
+            example:
+              newDormancyDate: "2026-06-30"
+      responses:
+        "200":
+          description: 更新結果（COBOL status=00。NOOP も 200）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DormancyDateUpdateResponse"
+              example:
+                previousDormancyDate: "2024-06-30"
+                wasNoop: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /accounts/{accountNo}/state-transitions:
+    post:
+      tags: [accounts]
+      operationId: changeAccountState
+      summary: "口座状態を遷移（ALC-CHANGE-STATE）"
+      description: |
+        状態機械に基づき口座状態を遷移する。21-audit へ監査記録を残す。
+        アクション: AC(P→A) / CN(P→C) / SU(A,D→S) / LS(S→A) / CL(A,D→C) / FC(非C→C)。
+        SU/FC は reason 必須。遷移不許可・必須理由欠落は 400（COBOL status=08）。
+      parameters:
+        - $ref: "#/components/parameters/AccountNoPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountStateTransitionRequest"
+            example:
+              action: "AC"
+              businessDate: "2026-06-30"
+      responses:
+        "200":
+          description: 遷移成功（COBOL status=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountStateTransitionResponse"
+              example:
+                fromStatus: "P"
+                targetStatus: "A"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /account-lifecycle/dormancy-scan:
+    post:
+      tags: [account-lifecycle]
+      operationId: runDormancyScan
+      summary: "休眠化スキャン（ALC-DORMANCY-SCAN）"
+      description: |
+        基準日 = 業務日 - 730 日（2 年）で休眠候補を走査し、A→D へ遷移する。
+        遷移件数とスキップ件数を返す。候補なしは 404（COBOL status=04）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LifecycleScanRequest"
+            example:
+              businessDate: "2026-06-30"
+      responses:
+        "200":
+          description: スキャン完了（COBOL status=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DormancyScanResponse"
+              example:
+                transitioned: 12
+                skipped: 3
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /account-lifecycle/reactivation-scan:
+    post:
+      tags: [account-lifecycle]
+      operationId: runReactivationScan
+      summary: "再活性スキャン（ALC-REACTIVATION-SCAN、スタブ）"
+      description: |
+        再活性スキャン。現状はスタブで常に 404（COBOL status=04）を返す（将来実装）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LifecycleScanRequest"
+            example:
+              businessDate: "2026-06-30"
+      responses:
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================================
+  # ヘルスチェック
+  # ============================================================
+  /actuator/health:
+    get:
+      tags: [health]
+      operationId: healthCheck
+      summary: ヘルスチェック
+      responses:
+        "200":
+          description: 正常稼働中
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "UP"
+
+# ============================================================
+# コンポーネント定義
+# ============================================================
+components:
+
+  # ---- 共通パラメータ ----------------------------------------
+  parameters:
+    CalendarDatePath:
+      name: date
+      in: path
+      required: true
+      schema:
+        type: string
+        format: date
+        example: "2026-01-01"
+      description: "対象日（YYYY-MM-DD、範囲 2026-01-01〜2030-12-31。COBOL CAL-INPUT-DATE）"
+
+    CustomerIdPath:
+      name: customerId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9]{1,10}$"
+        example: "0000000042"
+      description: "顧客 ID（10 桁数字。COBOL CUST-IN-ID）"
+
+    AccountNoPath:
+      name: accountNo
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9]{13}$"
+        example: "1000010000001"
+      description: "口座番号（13 桁数字。COBOL ACCT-LOOKUP-NUMBER）"
+
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: "1 ページあたりの件数"
+
+  schemas:
+
+    # ---- 01-calendar -----------------------------------------
+    BusinessCalendarDay:
+      type: object
+      description: "営業日カレンダーの 1 日"
+      required: [date, dayType]
+      properties:
+        date:
+          type: string
+          format: date
+          # COBOL: CAL-INPUT-DATE PIC 9(8) → YYYY-MM-DD
+          description: "対象日"
+          example: "2026-01-01"
+        dayType:
+          type: string
+          enum: [B, H, W]
+          # COBOL: CAL-OUTPUT-DAY-TYPE PIC X(1)
+          description: "区分（B=営業 / H=祝日 / W=週末）"
+          example: "H"
+        holidayName:
+          type: string
+          maxLength: 40
+          nullable: true
+          # COBOL: CAL-OUTPUT-HOLIDAY-NAME PIC X(40)（祝日時のみ）
+          description: "祝日名（dayType=H のときのみ設定）"
+          example: "元日"
+
+    BusinessDayResult:
+      type: object
+      description: "翌/前営業日の算出結果"
+      required: [baseDate, businessDate]
+      properties:
+        baseDate:
+          type: string
+          format: date
+          description: "起点日"
+          example: "2026-01-01"
+        businessDate:
+          type: string
+          format: date
+          # COBOL: CAL-OUTPUT-NEXT-DATE PIC 9(8) → YYYY-MM-DD
+          description: "算出された営業日"
+          example: "2026-01-05"
+
+    # ---- 02-branch -------------------------------------------
+    Branch:
+      type: object
+      description: "支店情報"
+      required: [branchCode, nameKanji, region, status]
+      properties:
+        branchCode:
+          type: string
+          # COBOL: BR-OUT-CODE PIC X(3)
+          description: "支店コード"
+          example: "100"
+        nameKanji:
+          type: string
+          maxLength: 40
+          # COBOL: BR-OUT-NAME-KANJI PIC X(40)
+          description: "支店名（漢字）"
+          example: "本店営業部"
+        nameKana:
+          type: string
+          maxLength: 40
+          # COBOL: BR-OUT-NAME-KANA PIC X(40)
+          description: "支店名（カナ）"
+          example: "ホンテンエイギョウブ"
+        region:
+          type: string
+          maxLength: 20
+          # COBOL: BR-OUT-REGION PIC X(20)
+          description: "地域"
+          example: "関東"
+        status:
+          type: string
+          # COBOL: BR-OUT-STATUS-CODE PIC X(1)
+          description: "支店状態"
+          example: "A"
+
+    BranchListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Branch"
+        totalCount:
+          type: integer
+          description: "件数"
+
+    # ---- 03-customer -----------------------------------------
+    Customer:
+      type: object
+      description: "顧客情報"
+      required: [customerId, kana, kanji, status]
+      properties:
+        customerId:
+          type: string
+          # COBOL: CUST-OUT-ID PIC 9(10)
+          description: "顧客 ID"
+          example: "0000000042"
+        kana:
+          type: string
+          maxLength: 50
+          # COBOL: CUST-OUT-KANA PIC X(50)
+          description: "カナ氏名"
+          example: "ヤマダタロウ"
+        kanji:
+          type: string
+          maxLength: 60
+          # COBOL: CUST-OUT-KANJI PIC X(60)
+          description: "漢字氏名"
+          example: "山田太郎"
+        phone:
+          type: string
+          maxLength: 15
+          # COBOL: CUST-OUT-PHONE PIC X(15)
+          description: "電話番号"
+          example: "0312345678"
+        address:
+          type: string
+          maxLength: 200
+          # COBOL: CUST-OUT-ADDRESS PIC X(200)
+          description: "住所"
+          example: "東京都千代田区..."
+        openedDate:
+          type: string
+          format: date
+          nullable: true
+          # COBOL: CUST-OUT-OPENED PIC 9(8)（CUST-LOOKUP のみ設定）
+          description: "開設日（単件取得時のみ。一覧/検索では null）"
+          example: "2020-04-01"
+        status:
+          type: string
+          # COBOL: CUST-OUT-STATUS-CODE PIC X(1)
+          description: "顧客状態"
+          example: "A"
+        tier:
+          type: string
+          # COBOL: CR-TIER PIC X(1)
+          description: "顧客ティア"
+          example: "1"
+
+    CustomerListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Customer"
+        totalCount:
+          type: integer
+          description: "件数"
+        hasMore:
+          type: boolean
+          description: "次ページが存在する場合 true"
+        lastId:
+          type: string
+          description: "次ページの startAfter に渡すカーソル値（最後の顧客 ID）"
+
+    CustomerStatusChangeRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          # COBOL: CR-STATUS PIC X(1)（REWRITE 対象）
+          description: "変更後の顧客状態"
+          example: "S"
+        reason:
+          type: string
+          maxLength: 200
+          description: "変更理由（監査記録に残す）"
+          example: "本人申告による一時停止"
+
+    # ---- 04-customersearch -----------------------------------
+    CustomerSearchMatch:
+      type: object
+      description: "顧客検索の一致レコード"
+      required: [customerId]
+      properties:
+        customerId:
+          type: string
+          # COBOL: CSRCH-MATCH-ID PIC 9(10)
+          description: "一致顧客 ID"
+          example: "0000000042"
+        kana:
+          type: string
+          maxLength: 50
+          # COBOL: CSRCH-MATCH-KANA PIC X(50)
+          description: "カナ氏名"
+          example: "ヤマダタロウ"
+        kanji:
+          type: string
+          maxLength: 60
+          # COBOL: CSRCH-MATCH-KANJI PIC X(60)
+          description: "漢字氏名"
+          example: "山田太郎"
+        phone:
+          type: string
+          maxLength: 15
+          # COBOL: CSRCH-MATCH-PHONE PIC X(15)
+          description: "電話番号"
+          example: "0312345678"
+        address:
+          type: string
+          maxLength: 200
+          # COBOL: CSRCH-MATCH-ADDR PIC X(200)
+          description: "住所"
+          example: "東京都千代田区..."
+
+    CustomerSearchListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CustomerSearchMatch"
+        totalCount:
+          type: integer
+          description: "件数"
+        hasMore:
+          type: boolean
+          description: "次ページが存在する場合 true"
+        lastId:
+          type: string
+          # COBOL: CSRCH-LAST-ID PIC 9(10)
+          description: "次ページの startAfter に渡すカーソル値"
+
+    # ---- 05-product ------------------------------------------
+    Product:
+      type: object
+      description: "商品情報"
+      required: [productCode, name, type]
+      properties:
+        productCode:
+          type: string
+          # COBOL: PRD-OUT-CODE PIC X(3)
+          description: "商品コード"
+          example: "001"
+        name:
+          type: string
+          maxLength: 40
+          # COBOL: PRD-OUT-NAME PIC X(40)
+          description: "商品名"
+          example: "普通預金"
+        type:
+          type: string
+          enum: [S, C, T]
+          # COBOL: PRD-OUT-TYPE PIC X(1)
+          description: "種別（S=普通 / C=当座 / T=定期）"
+          example: "S"
+        interestType:
+          type: string
+          # COBOL: PRD-OUT-INTEREST-TYPE
+          description: "利息種別"
+          example: "1"
+        allowOverdraft:
+          type: boolean
+          # COBOL: PRD-OUT-ALLOW-OVD（当座貸越可否）
+          description: "当座貸越可否"
+          example: false
+        termDays:
+          type: integer
+          # COBOL: PRD-OUT-TERM-DAYS PIC 9(4)
+          description: "預入期間（日）"
+          example: 0
+        effectiveFrom:
+          type: string
+          format: date
+          # COBOL: PRD-OUT-EFF-FROM PIC 9(8) → YYYY-MM-DD
+          description: "有効開始日"
+          example: "2020-04-01"
+        effectiveTo:
+          type: string
+          format: date
+          # COBOL: PRD-OUT-EFF-TO PIC 9(8) → YYYY-MM-DD
+          description: "有効終了日"
+          example: "2099-12-31"
+
+    # ---- 06-interestrate -------------------------------------
+    InterestRate:
+      type: object
+      description: "金利情報"
+      required: [productCode, tier, rateMicro, effectiveFrom, effectiveTo]
+      properties:
+        productCode:
+          type: string
+          # COBOL: IR-IN-PRODUCT PIC X(3)
+          description: "商品コード"
+          example: "001"
+        tier:
+          type: integer
+          # COBOL: IR-IN-TIER PIC 9(2)
+          description: "ティア"
+          example: 1
+        rateMicro:
+          type: integer
+          format: int64
+          # COBOL: IR-OUT-RATE-MICRO PIC 9(7)（金利×1,000,000）
+          description: "金利（マイクロ単位、×1,000,000）"
+          example: 1000
+        effectiveFrom:
+          type: string
+          format: date
+          # COBOL: IR-OUT-EFF-FROM PIC 9(8) → YYYY-MM-DD
+          description: "有効開始日"
+          example: "2026-04-01"
+        effectiveTo:
+          type: string
+          format: date
+          # COBOL: IR-OUT-EFF-TO PIC 9(8) → YYYY-MM-DD
+          description: "有効終了日"
+          example: "2099-12-31"
+
+    # ---- 07-feeschedule --------------------------------------
+    FeeSchedule:
+      type: object
+      description: "手数料体系情報"
+      required: [category, tier, feeJpy, effectiveTo]
+      properties:
+        category:
+          type: integer
+          enum: [10, 20, 30, 40]
+          # COBOL: FS-IN-CATEGORY PIC 9(2)
+          description: "手数料区分"
+          example: 10
+        tier:
+          type: integer
+          # COBOL: FS-IN-TIER PIC 9(2)
+          description: "ティア"
+          example: 1
+        feeJpy:
+          type: integer
+          format: int64
+          # COBOL: FS-OUT-FEE-JPY PIC S9(9)
+          description: "手数料額（円）"
+          example: 330
+        effectiveTo:
+          type: string
+          format: date
+          # COBOL: FS-OUT-EFF-TO PIC 9(8) → YYYY-MM-DD
+          description: "有効終了日"
+          example: "2099-12-31"
+
+    # ---- 08-account ------------------------------------------
+    Account:
+      type: object
+      description: "口座情報"
+      required: [accountNumber, customerId, productCode, branchCode, status]
+      properties:
+        accountNumber:
+          type: string
+          # COBOL: ACCT-LO-NUMBER PIC 9(13)
+          description: "口座番号"
+          example: "1000010000001"
+        customerId:
+          type: string
+          # COBOL: ACCT-LO-CUST-ID PIC 9(10)
+          description: "顧客 ID"
+          example: "0000000042"
+        productCode:
+          type: string
+          # COBOL: ACCT-LO-PRODUCT-CODE PIC 9(3)
+          description: "商品コード"
+          example: "001"
+        branchCode:
+          type: string
+          # COBOL: ACCT-LO-BRANCH-CODE PIC 9(3)
+          description: "支店コード"
+          example: "100"
+        openedDate:
+          type: string
+          format: date
+          # COBOL: ACCT-LO-OPENED-DATE PIC 9(8) → YYYY-MM-DD
+          description: "開設日"
+          example: "2020-04-01"
+        closedDate:
+          type: string
+          format: date
+          nullable: true
+          # COBOL: ACCT-LO-CLOSED-DATE PIC 9(8) → YYYY-MM-DD
+          description: "解約日"
+          example: null
+        status:
+          type: string
+          enum: [P, A, D, S, C, R]
+          # COBOL: ACCT-LO-STATUS PIC X(1)
+          description: "状態（P=申込中 / A=有効 / D=休眠 / S=停止 / C=解約 / R=再活性）"
+          example: "A"
+        dormancyDate:
+          type: string
+          format: date
+          nullable: true
+          # COBOL: ACCT-LO-DORMANCY-DATE PIC 9(8) → YYYY-MM-DD
+          description: "休眠日"
+          example: null
+        createdAt:
+          type: string
+          format: date-time
+          # COBOL: ACCT-LO-CREATED-TS PIC 9(14)
+          description: "作成タイムスタンプ"
+          example: "2020-04-01T09:00:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          # COBOL: ACCT-LO-UPDATED-TS PIC 9(14)
+          description: "更新タイムスタンプ"
+          example: "2020-04-01T09:00:00Z"
+
+    AccountListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Account"
+        totalCount:
+          type: integer
+          # COBOL: LOOKUP-BY-CUST-COUNT
+          description: "取得件数"
+        hasMore:
+          type: boolean
+          # COBOL: LOOKUP-BY-CUST-MORE
+          description: "次ページが存在する場合 true"
+        lastId:
+          type: string
+          # COBOL: LOOKUP-BY-CUST-LAST-ACCT
+          description: "次ページの startAfter に渡すカーソル値（最後の口座番号）"
+        warning:
+          type: boolean
+          default: false
+          # COBOL: status=02（重複検知）
+          description: "重複検知時 true（COBOL status=02）"
+
+    AccountExistsResponse:
+      type: object
+      required: [found]
+      properties:
+        found:
+          type: boolean
+          # COBOL: ACCT-EXISTS-FOUND Y/N
+          description: "口座が存在するか"
+          example: true
+        statusCode:
+          type: string
+          nullable: true
+          # COBOL: ACCT-EXISTS-STATUS-CODE
+          description: "状態（存在時のみ）"
+          example: "A"
+        productCode:
+          type: string
+          nullable: true
+          # COBOL: ACCT-EXISTS-PRODUCT-CODE
+          description: "商品コード（存在時のみ）"
+          example: "001"
+        active:
+          type: boolean
+          # COBOL: ACCT-EXISTS-ACTIVE-FLAG（状態=A なら Y）
+          description: "状態=A のとき true"
+          example: true
+
+    DormancyDateUpdateRequest:
+      type: object
+      required: [newDormancyDate]
+      properties:
+        newDormancyDate:
+          type: string
+          format: date
+          # COBOL: UPDATE-DORMANCY-NEW-DATE PIC 9(8)
+          description: "新しい休眠日（旧休眠日以上であること）"
+          example: "2026-06-30"
+
+    DormancyDateUpdateResponse:
+      type: object
+      required: [wasNoop]
+      properties:
+        previousDormancyDate:
+          type: string
+          format: date
+          nullable: true
+          # COBOL: UPDATE-DORMANCY-PREV-DATE
+          description: "更新前の休眠日"
+          example: "2024-06-30"
+        wasNoop:
+          type: boolean
+          # COBOL: UPDATE-DORMANCY-WAS-NOOP Y/N
+          description: "更新不要だった場合 true"
+          example: false
+
+    # ---- 09-accountlifecycle ---------------------------------
+    AccountOpenRequest:
+      type: object
+      required: [customerId, productCode, branchCode, openedDate]
+      properties:
+        customerId:
+          type: string
+          pattern: "^[0-9]{1,10}$"
+          # COBOL: ALC-OPEN-CUST-ID PIC 9(10)
+          description: "顧客 ID"
+          example: "0000000042"
+        productCode:
+          type: string
+          pattern: "^[0-9A-Za-z]{3}$"
+          # COBOL: ALC-OPEN-PRODUCT-CODE
+          description: "商品コード"
+          example: "001"
+        branchCode:
+          type: string
+          pattern: "^[0-9A-Za-z]{3}$"
+          # COBOL: ALC-OPEN-BRANCH-CODE
+          description: "支店コード"
+          example: "100"
+        openedDate:
+          type: string
+          format: date
+          # COBOL: ALC-OPEN-OPENED-DATE
+          description: "開設日"
+          example: "2026-04-01"
+        overdraftLimit:
+          type: integer
+          format: int64
+          nullable: true
+          # COBOL: ALC-OPEN-OVERDRAFT-LIMIT PIC S9(15) COMP-3
+          description: "当座貸越枠（任意）"
+          example: 0
+        termDays:
+          type: integer
+          nullable: true
+          # COBOL: ALC-OPEN-TERM-DAYS
+          description: "預入期間（任意）"
+          example: 0
+
+    AccountOpenResponse:
+      type: object
+      required: [accountNumber, status]
+      properties:
+        accountNumber:
+          type: string
+          # COBOL: ALC-OPEN-ACCT-NUMBER PIC 9(13)
+          description: "採番された口座番号（支店+商品+連番）"
+          example: "1000019000001"
+        status:
+          type: string
+          enum: [P]
+          description: "初期状態（常に P=申込中）"
+          example: "P"
+
+    AccountStateTransitionRequest:
+      type: object
+      required: [action, businessDate]
+      properties:
+        action:
+          type: string
+          enum: [AC, CN, SU, LS, CL, FC]
+          # COBOL: ALC-CHANGE-ACTION-CODE
+          description: |
+            アクション（AC=有効化 P→A / CN=取消 P→C / SU=停止 A,D→S /
+            LS=停止解除 S→A / CL=解約 A,D→C / FC=強制解約 非C→C）
+          example: "AC"
+        reason:
+          type: string
+          maxLength: 80
+          # COBOL: ALC-CHANGE-REASON-TEXT PIC X(80)（SU/FC で必須）
+          description: "理由（action=SU/FC のとき必須）"
+          example: "本人申告による停止"
+        businessDate:
+          type: string
+          format: date
+          # COBOL: ALC-CHANGE-BUSINESS-DATE
+          description: "業務日"
+          example: "2026-06-30"
+
+    AccountStateTransitionResponse:
+      type: object
+      required: [fromStatus, targetStatus]
+      properties:
+        fromStatus:
+          type: string
+          enum: [P, A, D, S, C, R]
+          # COBOL: ALC-CHANGE-FROM-STATUS
+          description: "遷移前状態"
+          example: "P"
+        targetStatus:
+          type: string
+          enum: [P, A, D, S, C, R]
+          # COBOL: ALC-CHANGE-TARGET-STATUS
+          description: "遷移後状態"
+          example: "A"
+
+    LifecycleScanRequest:
+      type: object
+      required: [businessDate]
+      properties:
+        businessDate:
+          type: string
+          format: date
+          # COBOL: ALC-DORMANCY-BUSINESS-DATE（基準日=業務日-730日）
+          description: "業務日"
+          example: "2026-06-30"
+
+    DormancyScanResponse:
+      type: object
+      required: [transitioned, skipped]
+      properties:
+        transitioned:
+          type: integer
+          # COBOL: ALC-DORMANCY-TRANSITIONED PIC 9(6)
+          description: "休眠へ遷移した件数"
+          example: 12
+        skipped:
+          type: integer
+          # COBOL: ALC-DORMANCY-SKIPPED PIC 9(6)
+          description: "スキップ件数"
+          example: 3
+
+    # ---- エラーレスポンス（全スライス共通） --------------------
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_input
+            - not_found
+            - io_failure
+            - fatal
+          description: "エラー種別"
+        detail:
+          type: string
+          description: "追加情報（400 時のみ設定）"
+
+  # ---- 共通レスポンス参照 ------------------------------------
+  responses:
+    BadRequest:
+      description: 入力不正（COBOL status=08）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "invalid_input"
+            detail: "入力値が不正です"
+    NotFound:
+      description: 該当なし（COBOL status=04）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "not_found"
+    InternalError:
+      description: I/O失敗 / 致命的エラー（COBOL status=12 or 16）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "io_failure"

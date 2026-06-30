@@ -1,66 +1,50 @@
-# test-container サンプル API を ACR でビルドし Container App へデプロイするワークフロー。
+# test-container サンプル API を ACR へ build & push するワークフロー。
 #
-# 必要な GitHub Secret:
-#   AZURE_CREDENTIALS ... サービスプリンシパルの JSON（az ad sp create-for-rbac --sdk-auth の出力）
+# サービスプリンシパル(SP)は不要。ACR の admin 認証情報のみを使用する。
 #
-# 必要に応じて env の値（リソース名）を自分の環境に合わせて変更すること。
-name: Deploy test-container
+# 必要な GitHAub Secret（Settings > Secrets and variables > Actions）:
+#   ACR_LOGIN_SERVER ... 例: pbwscobolacr3nt77.azurecr.io
+#   ACR_USERNAME     ... ACR admin ユーザー名（= レジストリ名）
+#   ACR_PASSWORD     ... ACR admin パスワード
+#
+# デプロイ（Container App の更新）は ARM 権限が必要なため、このワークフローには含めない。
+# push 後に Contributor 権限を持つ環境から以下を実行してデプロイする:
+#   az containerapp update -n pbwscobol-api -g pbwscobol-rg \
+#     --image <ACR_LOGIN_SERVER>/sample-accounts:<tag>
+name: Build & push test-container
 
 on:
   push:
-    branches: [azure-infra]
+    branches: [main]
     paths:
       - "infra/terraform/test-container/**"
       - ".github/workflows/deploy-test-container.yml"
   workflow_dispatch:
 
 env:
-  RESOURCE_GROUP: pbwscobol-rg
-  ACR_NAME: pbwscobolacr3nt77
-  CONTAINERAPP_NAME: pbwscobol-api
   IMAGE_REPO: sample-accounts
-  TARGET_PORT: "8080"
 
 jobs:
-  build-and-deploy:
+  build-and-push:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Build & push image with ACR
-        run: |
-          az acr build \
-            --registry "$ACR_NAME" \
-            --image "$IMAGE_REPO:${{ github.sha }}" \
-            --image "$IMAGE_REPO:latest" \
-            infra/terraform/test-container
-
-      - name: Configure ACR pull on Container App
-        run: |
-          ACR_USER=$(az acr credential show -n "$ACR_NAME" --query username -o tsv)
-          ACR_PASS=$(az acr credential show -n "$ACR_NAME" --query 'passwords[0].value' -o tsv)
-          az containerapp registry set \
-            --name "$CONTAINERAPP_NAME" \
-            --resource-group "$RESOURCE_GROUP" \
-            --server "$ACR_NAME.azurecr.io" \
-            --username "$ACR_USER" \
-            --password "$ACR_PASS"
-
-      - name: Update Container App image
-        run: |
-          az containerapp update \
-            --name "$CONTAINERAPP_NAME" \
-            --resource-group "$RESOURCE_GROUP" \
-            --image "$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ github.sha }}"
-
-      - name: Ensure ingress target port
-        run: |
-          az containerapp ingress update \
-            --name "$CONTAINERAPP_NAME" \
-            --resource-group "$RESOURCE_GROUP" \
-            --target-port "$TARGET_PORT"
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/terraform/test-container
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:${{ github.sha }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPO }}:latest
