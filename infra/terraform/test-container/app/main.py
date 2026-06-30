@@ -65,7 +65,7 @@ def on_startup():
 
 @app.get("/")
 def root():
-    return {"service": "sample-accounts", "status": "ok"}
+    return {"service": "sample-accounts", "status": "ok!!!"}
 
 
 @app.get("/health")
