@@ -1,0 +1,12 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+tfplan
+*.tfplan
+
+# 機密値を含む実値ファイル（example はコミットする）
+terraform.tfvars
+*.auto.tfvars

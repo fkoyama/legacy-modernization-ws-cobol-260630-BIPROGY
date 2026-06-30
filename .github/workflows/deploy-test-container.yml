@@ -1,0 +1,66 @@
+# test-container サンプル API を ACR でビルドし Container App へデプロイするワークフロー。
+#
+# 必要な GitHub Secret:
+#   AZURE_CREDENTIALS ... サービスプリンシパルの JSON（az ad sp create-for-rbac --sdk-auth の出力）
+#
+# 必要に応じて env の値（リソース名）を自分の環境に合わせて変更すること。
+name: Deploy test-container
+
+on:
+  push:
+    branches: [azure-infra]
+    paths:
+      - "infra/terraform/test-container/**"
+      - ".github/workflows/deploy-test-container.yml"
+  workflow_dispatch:
+
+env:
+  RESOURCE_GROUP: pbwscobol-rg
+  ACR_NAME: pbwscobolacr3nt77
+  CONTAINERAPP_NAME: pbwscobol-api
+  IMAGE_REPO: sample-accounts
+  TARGET_PORT: "8080"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build & push image with ACR
+        run: |
+          az acr build \
+            --registry "$ACR_NAME" \
+            --image "$IMAGE_REPO:${{ github.sha }}" \
+            --image "$IMAGE_REPO:latest" \
+            infra/terraform/test-container
+
+      - name: Configure ACR pull on Container App
+        run: |
+          ACR_USER=$(az acr credential show -n "$ACR_NAME" --query username -o tsv)
+          ACR_PASS=$(az acr credential show -n "$ACR_NAME" --query 'passwords[0].value' -o tsv)
+          az containerapp registry set \
+            --name "$CONTAINERAPP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --server "$ACR_NAME.azurecr.io" \
+            --username "$ACR_USER" \
+            --password "$ACR_PASS"
+
+      - name: Update Container App image
+        run: |
+          az containerapp update \
+            --name "$CONTAINERAPP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/$IMAGE_REPO:${{ github.sha }}"
+
+      - name: Ensure ingress target port
+        run: |
+          az containerapp ingress update \
+            --name "$CONTAINERAPP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --target-port "$TARGET_PORT"
