@@ -1,0 +1,243 @@
+openapi: "3.0.3"
+info:
+  title: "{スライス名} API"
+  # 例: "Account Lookup API" / "Product Reference API" / "Customer API"
+  version: "1.0.0"
+  description: |
+    practice-bank モダナイゼーション — 読み取り専用スライス
+    対応COBOLサブシステム: {例: 08-account}
+    COBOLステータス→HTTP: 00→200 / 04→404 / 08→400 / 12,16→500
+
+servers:
+  - url: "https://{container-apps-fqdn}"
+    description: Azure Container Apps (本番)
+  - url: "http://localhost:5000"
+    description: ローカル開発
+
+# ============================================================
+# パス定義
+# ============================================================
+paths:
+
+  # ---- 単件取得 ------------------------------------------------
+  /{resource}/{id}:
+    get:
+      operationId: get{Resource}ById
+      summary: "{リソース名}を1件取得"
+      description: |
+        {パスパラメータ} をキーにマスタから1件返す。
+        COBOL ACCT-LOOKUP-STATUS (または対応するステータスフィールド) の戻り値に従いHTTPステータスを決定する。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            # 例（口座）: pattern: "^[0-9]{13}$"
+            pattern: "{正規表現}"
+            example: "{入力例}"
+          description: "{説明。例: 口座番号（13桁数字）}"
+      responses:
+        "200":
+          description: 正常（COBOL status=00）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/{Resource}"
+              example:
+                {camelCaseField1}: "{値例}"
+                {camelCaseField2}: "{値例}"
+        "400":
+          description: 入力不正（COBOL status=08）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid_input"
+                detail: "{バリデーション失敗理由}"
+        "404":
+          description: 該当なし（COBOL status=04）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "not_found"
+        "500":
+          description: I/O失敗 / 致命的エラー（COBOL status=12 or 16）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "io_failure"
+
+  # ---- リスト・検索 (ある場合のみ) ----------------------------
+  /{resource}:
+    get:
+      operationId: list{Resource}
+      summary: "{リソース名}を検索・一覧取得"
+      parameters:
+        - name: "{queryParam}"
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "{説明}"
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: "1ページあたりの件数"
+        - name: startAfter
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "カーソルページネーション用: 前ページ最後のID"
+      responses:
+        "200":
+          description: 正常（0件でも200）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/{Resource}ListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ---- ヘルスチェック (全スライス共通) -------------------------
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: ヘルスチェック
+      responses:
+        "200":
+          description: 正常稼働中
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+
+# ============================================================
+# コンポーネント定義
+# ============================================================
+components:
+
+  schemas:
+
+    # ---- メインリソース ----------------------------------------
+    {Resource}:
+      type: object
+      description: "{リソース名}の情報"
+      required:
+        - "{必須フィールド1}"
+        - "{必須フィールド2}"
+      properties:
+        # フィールドごとに追加。COBOLフィールド名をコメントで残す。
+        "{camelCaseField1}":
+          type: string
+          # COBOL: {COBOL-FIELD-NAME} PIC {PIC定義}
+          description: "{説明}"
+          example: "{例}"
+        "{camelCaseField2}":
+          type: string
+          format: date
+          # COBOL: {COBOL-FIELD-NAME} PIC 9(8) → YYYY-MM-DD に変換
+          description: "{説明}"
+          example: "2024-04-01"
+
+    # ---- リストレスポンス (検索エンドポイントがある場合) --------
+    {Resource}ListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/{Resource}"
+        totalCount:
+          type: integer
+          description: "マッチした総件数（ページング前）"
+        hasMore:
+          type: boolean
+          description: "次ページが存在する場合 true（COBOL LOOKUP-BY-CUST-MORE に対応）"
+        lastId:
+          type: string
+          description: "次ページの startAfter に渡すカーソル値"
+
+    # ---- エラーレスポンス (全スライス共通) ----------------------
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_input
+            - not_found
+            - io_failure
+            - fatal
+          description: "エラー種別"
+        detail:
+          type: string
+          description: "追加情報（400時のみ設定）"
+
+  # ---- 共通レスポンス参照 ------------------------------------
+  responses:
+    BadRequest:
+      description: 入力不正（COBOL status=08）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: サーバエラー（COBOL status=12 or 16）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+# ============================================================
+# 記入例 — 口座照会(08-account) をそのまま流用する場合
+# ============================================================
+# paths:
+#   /accounts/{num}:
+#     get:
+#       parameters:
+#         - name: num
+#           in: path
+#           required: true
+#           schema:
+#             type: string
+#             pattern: "^[0-9]{13}$"
+#       responses:
+#         "200":
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: "#/components/schemas/Account"
+#
+# components:
+#   schemas:
+#     Account:
+#       properties:
+#         accountNumber:  { type: string, example: "0000000012345" }   # ACCT-LO-NUMBER
+#         custId:         { type: string, example: "0000000042" }      # ACCT-LO-CUST-ID
+#         productCode:    { type: string, example: "001" }             # ACCT-LO-PRODUCT-CODE
+#         branchCode:     { type: string, example: "100" }             # ACCT-LO-BRANCH-CODE
+#         openedDate:     { type: string, format: date }               # ACCT-LO-OPENED-DATE
+#         status:         { type: string, enum: [P,A,D,S,C,R] }       # ACCT-LO-STATUS
+#         dormancyDate:   { type: string, format: date, nullable: true }# ACCT-LO-DORMANCY-DATE
+#         createdAt:      { type: string, format: date-time }          # ACCT-LO-CREATED-TS
+#         updatedAt:      { type: string, format: date-time }          # ACCT-LO-UPDATED-TS
